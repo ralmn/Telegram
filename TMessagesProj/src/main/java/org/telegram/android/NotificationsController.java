@@ -8,6 +8,7 @@
 
 package org.telegram.android;
 
+import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
@@ -16,10 +17,18 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
+import android.graphics.Typeface;
 import android.media.AudioManager;
 import android.net.Uri;
 import android.provider.Settings;
 import android.support.v4.app.NotificationCompat;
+import android.support.v4.app.NotificationCompatExtras;
+import android.support.v4.app.RemoteInput;
+import android.text.Spannable;
+import android.text.SpannableString;
+import android.text.Spanned;
+import android.text.style.StyleSpan;
+import android.util.Log;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -32,6 +41,7 @@ import org.telegram.messenger.TLRPC;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.Utilities;
 import org.telegram.objects.MessageObject;
+import org.telegram.objects.PhotoObject;
 import org.telegram.ui.ApplicationLoader;
 import org.telegram.ui.LaunchActivity;
 import org.telegram.ui.PopupNotificationActivity;
@@ -217,7 +227,32 @@ public class NotificationsController {
         return msg;
     }
 
-    private void showOrUpdateNotification(boolean notifyAboutLast) {
+    private String getMessageOwner(MessageObject messageObject){
+        long dialog_id = messageObject.messageOwner.dialog_id;
+        int chat_id = messageObject.messageOwner.to_id.chat_id;
+        int user_id = messageObject.messageOwner.to_id.user_id;
+        if (user_id == 0) {
+            user_id = messageObject.messageOwner.from_id;
+        } else if (user_id == UserConfig.getClientUserId()) {
+            user_id = messageObject.messageOwner.from_id;
+        }
+
+        if (dialog_id == 0) {
+            if (chat_id != 0) {
+                dialog_id = -chat_id;
+            } else if (user_id != 0) {
+                dialog_id = user_id;
+            }
+        }
+
+        TLRPC.User user = MessagesController.getInstance().users.get(user_id);
+        if (user == null) {
+            return "<null>";
+        }
+        return user.first_name;
+    }
+
+    public void showOrUpdateNotification(boolean notifyAboutLast) {
         if (!UserConfig.isClientActivated() || pushMessages.isEmpty()) {
             dismissNotification();
             return;
@@ -357,6 +392,20 @@ public class NotificationsController {
                     .setSmallIcon(R.drawable.notification)
                     .setAutoCancel(true)
                     .setContentIntent(contentIntent);
+            NotificationCompat.Builder wBuilder = new NotificationCompat.Builder(ApplicationLoader.applicationContext)
+                    .setContentTitle(name)
+                    .setSmallIcon(R.drawable.notification)
+                    .setAutoCancel(true)
+                    .setContentIntent(contentIntent);
+
+
+            ArrayList<Notification> pages =new ArrayList<Notification>();
+
+            NotificationCompat.WearableExtender wearableExtender =
+                    new NotificationCompat.WearableExtender()
+                            .setHintHideIcon(true);
+
+
 
             String lastMessage = null;
             if (pushMessages.size() == 1) {
@@ -376,16 +425,46 @@ public class NotificationsController {
             } else {
                 mBuilder.setContentText(detailText);
                 NotificationCompat.InboxStyle inboxStyle = new NotificationCompat.InboxStyle();
+
                 inboxStyle.setBigContentTitle(name);
+
+
+
+                NotificationCompat.InboxStyle wInboxStyle = new NotificationCompat.InboxStyle();
+                wInboxStyle.setBigContentTitle(name);
+                String wBigTextStyleContent = "";
+
                 int count = Math.min(10, pushMessages.size());
                 for (int i = 0; i < count; i++) {
-                    String message = getStringForMessage(pushMessages.get(i));
+                    MessageObject pm =pushMessages.get(i);
+                    String message = getStringForMessage(pm);
+                    if(pm.messageText.toString().equals(LocaleController.getString("AttachPhoto", R.string.AttachPhoto)) || pm.messageText.toString().equals("Photo")){
+                        //Image
+                        if(pm.photoThumbs.size() >0){
+
+                            PhotoObject photoObject = pm.photoThumbs.get(0);
+
+
+                            Notification photo = new NotificationCompat.Builder(ApplicationLoader.applicationContext)
+                                    .extend(new NotificationCompat.WearableExtender()
+                                    .setBackground(photoObject.image)
+                                    .setHintShowBackgroundOnly(true)).build();
+
+
+                            pages.add(photo);
+
+
+                        }
+                        continue;
+                    }
                     if (message == null) {
+
                         continue;
                     }
                     if (i == 0) {
                         lastMessage = message;
                     }
+
                     if (pushDialogs.size() == 1) {
                         if (replace) {
                             if (chat != null) {
@@ -395,16 +474,45 @@ public class NotificationsController {
                             }
                         }
                     }
+                    wBigTextStyleContent += message + "\n\r";
                     inboxStyle.addLine(message);
+                    Spannable sb = new SpannableString(getMessageOwner(pm));
+                    sb.setSpan(new StyleSpan(Typeface.BOLD), 0, getMessageOwner(pm).length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    wInboxStyle.addLine(sb);
+                    wInboxStyle.addLine(pm.messageText.toString());
+
+
                 }
+
+
+
+                // Create second page notification
+                Notification wSecondPageNotification = new NotificationCompat.Builder(ApplicationLoader.applicationContext)
+                        .setStyle(wInboxStyle)
+                        .build();
+                pages.add(0,wSecondPageNotification);
+
                 inboxStyle.setSummaryText(detailText);
                 mBuilder.setStyle(inboxStyle);
             }
+            if(lastMessage != null){
+                NotificationCompat.InboxStyle inboxStyle = new NotificationCompat.InboxStyle();
+                inboxStyle.setBigContentTitle(name);
+                inboxStyle.addLine(lastMessage);
+                inboxStyle.setSummaryText(lastMessage);
+                wBuilder.setStyle(inboxStyle);
+            }
+
+
+
+
 
             if (photoPath != null) {
+
                 Bitmap img = FileLoader.getInstance().getImageFromMemory(photoPath, null, null, "50_50");
                 if (img != null) {
                     mBuilder.setLargeIcon(img);
+                    wearableExtender.setBackground(img);
                 }
             }
 
@@ -430,7 +538,8 @@ public class NotificationsController {
             } else {
                 mBuilder.setVibrate(new long[]{0, 0});
             }
-
+            wearableExtender.addPages(pages);
+            mBuilder.extend(wearableExtender);
             notificationManager.notify(1, mBuilder.build());
             if (preferences.getBoolean("EnablePebbleNotifications", false)) {
                 sendAlertToPebble(lastMessage);
@@ -514,9 +623,11 @@ public class NotificationsController {
 
     public void processNewMessages(ArrayList<MessageObject> messageObjects, boolean isLast) {
         if (messageObjects.isEmpty()) {
+            Log.d("RALMN", "EMPTY");
             return;
         }
         boolean added = false;
+        pushMessagesDict.clear();
 
         int oldCount = popupMessages.size();
         HashMap<Long, Boolean> settingsCache = new HashMap<Long, Boolean>();
@@ -528,9 +639,9 @@ public class NotificationsController {
                 continue;
             }
             long dialog_id = messageObject.getDialogId();
-            if (dialog_id == openned_dialog_id && ApplicationLoader.isScreenOn) {
+           /* if (dialog_id == openned_dialog_id && ApplicationLoader.isScreenOn) {
                 continue;
-            }
+            }*/
             added = true;
 
             Boolean value = settingsCache.get(dialog_id);
